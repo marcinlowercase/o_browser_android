@@ -1,7 +1,9 @@
 package tom.o_browser
 
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -13,6 +15,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.InteractionSource
@@ -21,9 +30,13 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.add
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -53,13 +67,23 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.flow.collectLatest
 import tom.o_browser.ui.theme.O_browserTheme
+import java.util.jar.Manifest
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequesterModifierNode
+import androidx.core.view.WindowInsetsCompat
 
-val default_page: String = "https://oo3.deno.dev/i"
-var corner_radius: Dp = 48.dp
+
+val default_page: String = "https://arc.net/"
+var corner_radius: Dp = 24.dp
+
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,127 +91,199 @@ class MainActivity : ComponentActivity() {
 
 //        WindowInsetsControllerCompat(window,window.decorView).isAppearanceLightNavigationBars = false
 
+
         setContent {
             O_browserTheme {
-                Surface(modifier = Modifier.fillMaxSize(),
-                    color = if (isSystemInDarkTheme()) Color.Black else Color.White) {
-                    MainScreen(default_page)
+                val isDarkMode = isSystemInDarkTheme()
+                val isImmersiveMode = remember { mutableStateOf(false) }
 
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = when {
+                        isDarkMode -> Color.Black
+                        isImmersiveMode.value -> Color.Black
+                        else -> Color.White
+                    }
+                ) {
+                    MainScreen(
+                        initialUrl = default_page,
+                        onImmersiveModeChanged = { isImmersiveMode.value = it }
+                    )
                 }
             }
         }
     }
+
+
 }
 
+fun Activity.setImmersiveMode(enabled: Boolean) {
+    val controller = WindowInsetsControllerCompat(window, window.decorView)
+    if (enabled) {
+        controller.hide(
+            WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
+        )
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    } else {
+        controller.show(
+            WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
+        )
+    }
+}
 
 @Composable
-fun MainScreen(initialUrl: String) {
+fun MainScreen(
+    initialUrl: String,
+    onImmersiveModeChanged: (Boolean) -> Unit
+) {
     var text by remember { mutableStateOf(TextFieldValue(initialUrl)) }
-
-    // ✅ URL history stack
     val history = remember { mutableStateListOf(initialUrl) }
     var currentIndex by remember { mutableStateOf(0) }
+    var isSearchBarVisible by remember { mutableStateOf(true) }
+    val focusRequester = remember { FocusRequester() }
 
-    // ✅ System back = go back in history
-    BackHandler(enabled = currentIndex > 0) {
-        if (currentIndex > 0) {
+    val topPadding = if (isSearchBarVisible) {
+        WindowInsets.systemBars.asPaddingValues().calculateTopPadding()
+    } else {
+        WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+    }
+
+    val activity = LocalContext.current as? Activity
+
+    BackHandler(enabled = !isSearchBarVisible || currentIndex > 0) {
+        if (!isSearchBarVisible) {
+            isSearchBarVisible = true
+        } else if (currentIndex > 0) {
             currentIndex--
-            text = TextFieldValue(history[currentIndex]) // Update search box too
+            text = TextFieldValue(history[currentIndex])
         }
+    }
+
+    LaunchedEffect(isSearchBarVisible) {
+        if (isSearchBarVisible) focusRequester.requestFocus()
+        val immersive = !isSearchBarVisible
+        activity?.setImmersiveMode(immersive)
+        onImmersiveModeChanged(immersive)
     }
 
     Column(
         modifier = Modifier
-            .padding(WindowInsets.systemBars.asPaddingValues())
             .fillMaxSize()
+            .imePadding()
+            .padding(top = topPadding)
     ) {
-        SearchBar(
-            value = text,
-            onValueChange = { text = it },
-            onSearch = {
-                val input = text.text
-                val resolvedUrl = if (input.startsWith("http://") || input.startsWith("https://")) {
-                    input
-                } else {
-                    "https://www.google.com/search?q=" + input.replace(" ", "+")
-                }
-
-                // Avoid adding duplicate or navigating forward in stack
-                if (history.getOrNull(currentIndex) != resolvedUrl) {
-                    // Trim forward history
-                    while (history.size > currentIndex + 1) {
-                        history.removeAt(history.lastIndex)
-                    }
-
-                    history.add(resolvedUrl)
-                    currentIndex++
-                }
-            }
-        )
+        val horizontalPadding = if (isSearchBarVisible) 8.dp else 0.dp
 
         Box(modifier = Modifier.weight(1f)) {
-            WebView(
+            WebViewContainer(
                 url = history[currentIndex],
                 onPageFinished = { newUrl ->
                     if (newUrl != history.getOrNull(currentIndex)) {
-                        // Trim forward history
                         while (history.size > currentIndex + 1) history.removeAt(history.lastIndex)
-
                         history.add(newUrl)
                         currentIndex++
                     }
-
                     text = TextFieldValue(newUrl)
-                }
+                },
+                onWebViewTouched = { isSearchBarVisible = false },
+                horizontalPadding = horizontalPadding
             )
+        }
+
+        AnimatedVisibility(
+            visible = isSearchBarVisible,
+            enter = expandVertically(tween(300)),
+            exit = shrinkVertically(tween(300))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize()
+            ) {
+                SearchBar(
+                    value = text,
+                    onValueChange = { text = it },
+                    onSearch = {
+                        val input = text.text
+                        val resolvedUrl = if (input.startsWith("http")) {
+                            input
+                        } else {
+                            "https://www.google.com/search?q=${input.replace(" ", "+")}"
+                        }
+
+                        if (history.getOrNull(currentIndex) != resolvedUrl) {
+                            while (history.size > currentIndex + 1) history.removeAt(history.lastIndex)
+                            history.add(resolvedUrl)
+                            currentIndex++
+                        }
+
+                        isSearchBarVisible = false
+                    },
+                    onFocusChanged = { focused -> if (focused) isSearchBarVisible = true },
+                    focusRequester = focusRequester
+                )
+            }
         }
     }
 }
 
+
 @Composable
-fun WebView(
+fun WebViewContainer(
     url: String,
-    onPageFinished: (String) -> Unit
+    onPageFinished: (String) -> Unit,
+    onWebViewTouched: () -> Unit,
+    horizontalPadding: Dp = 0.dp
 ) {
-    Box(
-        modifier = Modifier
-            .padding(horizontal = 8.dp)
-            .border(2.dp, Color.Black, RoundedCornerShape(corner_radius))
-            .fillMaxSize()
-    ) {
+    val context = LocalContext.current
+
+    Box(modifier = Modifier
+        .padding(horizontal = horizontalPadding)
+        .fillMaxSize()) {
         AndroidView(
-            factory = { context ->
-                WebView(context).apply {
-                    setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
-                        val request = DownloadManager.Request(Uri.parse(url))
-                        request.setMimeType(mimeType)
-                        request.addRequestHeader("User-Agent", userAgent)
-                        request.setDescription("Downloading file...")
-                        request.setTitle(URLUtil.guessFileName(url, contentDisposition, mimeType))
-                        request.allowScanningByMediaScanner()
-                        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        request.setDestinationInExternalPublicDir(
-                            Environment.DIRECTORY_DOWNLOADS,
-                            URLUtil.guessFileName(url, contentDisposition, mimeType)
-                        )
-
-                        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                        dm.enqueue(request)
-
-                        Toast.makeText(context, "Downloading File...", Toast.LENGTH_LONG).show()
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    setOnTouchListener { _, _ ->
+                        onWebViewTouched()
+                        false
                     }
+
+                    setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                        val filename = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setMimeType(mimeType)
+                            addRequestHeader("User-Agent", userAgent)
+                            setDescription("Downloading file...")
+                            setTitle(filename)
+                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            setDestinationInExternalPublicDir(
+                                Environment.DIRECTORY_DOWNLOADS,
+                                filename
+                            )
+                            setAllowedOverMetered(true)
+                            setAllowedOverRoaming(true)
+                        }
+                        val dm =
+                            context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                        dm.enqueue(request)
+                        Toast.makeText(context, "Downloading File...", Toast.LENGTH_SHORT).show()
+                    }
+
                     settings.javaScriptEnabled = true
                     webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, newUrl: String?) {
+                        override fun onPageFinished(
+                            view: android.webkit.WebView?,
+                            newUrl: String?
+                        ) {
                             newUrl?.let { onPageFinished(it) }
                         }
                     }
+
                     loadUrl(url)
                 }
             },
-            update = {
-                if (it.url != url) it.loadUrl(url)
-            },
+            update = { it.loadUrl(url) },
             modifier = Modifier
                 .fillMaxSize()
                 .clip(RoundedCornerShape(corner_radius))
@@ -196,57 +292,34 @@ fun WebView(
 }
 
 
-
-
-
 @Composable
 fun SearchBar(
     value: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
     onSearch: () -> Unit,
-    cornerRadius: Dp = 48.dp
+    onFocusChanged: (Boolean) -> Unit,
+    focusRequester: FocusRequester,
+    cornerRadius: Dp = corner_radius
 ) {
     val focusManager = LocalFocusManager.current
-    val interactionSource = remember { MutableInteractionSource() }
-
-    // Track focus state to manage selection
-    var hasFocus by remember { mutableStateOf(false) }
-
-    LaunchedEffect(interactionSource) {
-        interactionSource.interactions.collectLatest { interaction ->
-            when (interaction) {
-                is FocusInteraction.Focus -> {
-                    hasFocus = true
-                    onValueChange(
-                        value.copy(selection = TextRange(0, value.text.length))
-                    )
-                }
-
-                is FocusInteraction.Unfocus -> {
-                    hasFocus = false
-                    onValueChange(
-                        value.copy(selection = TextRange(value.text.length)) // clears selection
-                    )
-                }
-
-                else -> {}
-            }
-        }
-    }
 
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         singleLine = true,
-        placeholder = { Text("enter url") },
+        placeholder = { Text("Enter URL or search") },
         shape = RoundedCornerShape(cornerRadius),
-        interactionSource = interactionSource,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(8.dp),
-        keyboardOptions = KeyboardOptions.Default.copy(
-            imeAction = ImeAction.Search
-        ),
+            .padding(8.dp)
+            .onFocusChanged {
+                onFocusChanged(it.isFocused)
+                if (it.isFocused) {
+                    onValueChange(value.copy(selection = TextRange(0, value.text.length)))
+                }
+            }
+            .focusRequester(focusRequester),
+        keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(
             onSearch = {
                 focusManager.clearFocus()
@@ -255,6 +328,8 @@ fun SearchBar(
         )
     )
 }
+
+
 @Preview(showBackground = true)
 @Composable
 fun GreetingPreview() {
